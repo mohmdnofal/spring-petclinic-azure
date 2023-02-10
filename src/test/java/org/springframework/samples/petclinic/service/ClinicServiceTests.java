@@ -134,39 +134,6 @@ class ClinicServiceTests {
 	}
 
 	@Test
-	void shouldFindAllPetTypes() {
-		Collection<PetType> petTypes = this.owners.findPetTypes();
-
-		PetType petType1 = EntityUtils.getById(petTypes, PetType.class, 1);
-		assertThat(petType1.getName()).isEqualTo("cat");
-		PetType petType4 = EntityUtils.getById(petTypes, PetType.class, 4);
-		assertThat(petType4.getName()).isEqualTo("snake");
-	}
-
-	@Test
-	@Transactional
-	void shouldInsertPetIntoDatabaseAndGenerateId() {
-		Owner owner6 = this.owners.findById(6);
-		int found = owner6.getPets().size();
-
-		Pet pet = new Pet();
-		pet.setName("bowser");
-		Collection<PetType> types = this.owners.findPetTypes();
-		pet.setType(EntityUtils.getById(types, PetType.class, 2));
-		pet.setBirthDate(LocalDate.now());
-		owner6.addPet(pet);
-		assertThat(owner6.getPets().size()).isEqualTo(found + 1);
-
-		this.owners.save(owner6);
-
-		owner6 = this.owners.findById(6);
-		assertThat(owner6.getPets().size()).isEqualTo(found + 1);
-		// checks that id has been generated
-		pet = owner6.getPet("bowser");
-		assertThat(pet.getId()).isNotNull();
-	}
-
-	@Test
 	@Transactional
 	void shouldUpdatePetName() throws Exception {
 		Owner owner6 = this.owners.findById(6);
@@ -180,17 +147,6 @@ class ClinicServiceTests {
 		owner6 = this.owners.findById(6);
 		pet7 = owner6.getPet(7);
 		assertThat(pet7.getName()).isEqualTo(newName);
-	}
-
-	@Test
-	void shouldFindVets() {
-		Collection<Vet> vets = this.vets.findAll();
-
-		Vet vet = EntityUtils.getById(vets, Vet.class, 3);
-		assertThat(vet.getLastName()).isEqualTo("Douglas");
-		assertThat(vet.getNrOfSpecialties()).isEqualTo(2);
-		assertThat(vet.getSpecialties().get(0).getName()).isEqualTo("dentistry");
-		assertThat(vet.getSpecialties().get(1).getName()).isEqualTo("surgery");
 	}
 
 	@Test

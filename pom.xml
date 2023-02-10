@@ -265,6 +265,15 @@
 
   <profiles>
     <profile>
+      <id>mysql</id>
+      <properties>
+        <activatedProperties>mysql</activatedProperties>
+      </properties>
+      <activation>
+        <activeByDefault>true</activeByDefault>
+      </activation>
+    </profile>
+    <profile>
       <id>css</id>
       <build>
         <plugins>

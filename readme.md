@@ -1,16 +1,97 @@
-# Spring PetClinic Sample Application [![Build Status](https://github.com/spring-projects/spring-petclinic/actions/workflows/maven-build.yml/badge.svg)](https://github.com/spring-projects/spring-petclinic/actions/workflows/maven-build.yml)
+# Spring PetClinic App on Azure 
 
-[![Open in Gitpod](https://gitpod.io/button/open-in-gitpod.svg)](https://gitpod.io/#https://github.com/spring-projects/spring-petclinic)
+This is a slightly modified version of the famous [PetClinic App](https://speakerdeck.com/michaelisvy/spring-petclinic-sample-application), the app configuration has been modified to run with MySQL as its default profile instead of H2. 
 
-## Understanding the Spring Petclinic application with a few diagrams
-<a href="https://speakerdeck.com/michaelisvy/spring-petclinic-sample-application">See the presentation here</a>
+In this demo we will spin up an Azure MySQL database, build a run the application locally, then deploy it to Azure App Service as a Jar file, after this we will build a container image and deploy the App to Azure Container Apps and Azure Kubernetes Service to demonstrate the choice and differences across these 3 platforms. 
 
-## Running petclinic locally
-Petclinic is a [Spring Boot](https://spring.io/guides/gs/spring-boot) application built using [Maven](https://spring.io/guides/gs/maven/) or [Gradle](https://spring.io/guides/gs/gradle/). You can build a jar file and run it from the command line (it should work just as well with Java 17 or newer):
+**Note** the following is just a demonstration to reflect on the Azure Platform choices, this is not how things should be deployed in production i.e. you will restrict access to VNETs, you will use managed identities and such. 
 
+# Deploy Azure MySQL Flexible Server 
+
+We Start by deploying a MySQL DB in Azure so we test against it.
 
 ```
-git clone https://github.com/spring-projects/spring-petclinic.git
+
+#define the variables 
+export RESOURCE_GROUP=spring-mysql
+export DATABASE_NAME=spring-mysql-$RANDOM
+export LOCATION=northeurope
+export MYSQL_ADMIN_USERNAME=moadmin
+export MYSQL_ADMIN_PASSWORD=mysql$RANDOM$RANDOM
+#needed for the spring application
+export MYSQL_NON_ADMIN_USERNAME=petclinic
+export MYSQL_NON_ADMIN_PASSWORD=petclinic$RANDOM$RANDOM
+
+#create resource group 
+az group create \
+    --name $RESOURCE_GROUP \
+    --location $LOCATION \
+    --output tsv
+
+#create the databse server 
+az mysql flexible-server create \
+    --resource-group $RESOURCE_GROUP \
+    --name $DATABASE_NAME \
+    --location $LOCATION \
+    --admin-user $MYSQL_ADMIN_USERNAME \
+    --admin-password $MYSQL_ADMIN_PASSWORD \
+    --yes \
+    --output tsv
+
+
+#create the petclinic database inside the database server 
+az mysql flexible-server db create \
+    --resource-group $RESOURCE_GROUP \
+    --database-name petclinic \
+    --server-name $DATABASE_NAME \
+    --output tsv
+
+#get your IP address so we can test locally 
+export MY_IP_ADDRESS=`curl ifconfig.co/`
+
+#add firewall rule for your IP address 
+az mysql flexible-server firewall-rule create \
+    --resource-group $RESOURCE_GROUP \
+    --name $DATABASE_NAME \
+    --start-ip-address $MY_IP_ADDRESS \
+    --end-ip-address $MY_IP_ADDRESS \
+    --rule-name allowmyip \
+    --output tsv
+
+#add the below rule to allow services from Azure to connect to the database 
+az mysql flexible-server firewall-rule create \
+    --resource-group $RESOURCE_GROUP \
+    --name $DATABASE_NAME \
+    --start-ip-address 0.0.0.0
+
+
+#the below script will create the user name and password for the petclinic databse 
+cat << EOF > create_user.sql
+CREATE USER '$MYSQL_NON_ADMIN_USERNAME'@'%' IDENTIFIED BY '$MYSQL_NON_ADMIN_PASSWORD';
+GRANT ALL PRIVILEGES ON petclinic.* TO '$MYSQL_NON_ADMIN_USERNAME'@'%';
+FLUSH PRIVILEGES;
+EOF
+
+#run the script 
+mysql -h $DATABASE_NAME.mysql.database.azure.com --user $MYSQL_ADMIN_USERNAME --enable-cleartext-plugin --password=$MYSQL_ADMIN_PASSWORD < create_user.sql
+
+#just in case you want to validate 
+mysql -h $DATABASE_NAME.mysql.database.azure.com --user $MYSQL_NON_ADMIN_USERNAME --enable-cleartext-plugin --password=$MYSQL_NON_ADMIN_PASSWORD
+
+#remove the file 
+rm create_user.sql
+
+# **dont skip this** the below variables will be needed from the application to function 
+export MYSQL_URL=jdbc:mysql://$DATABASE_NAME.mysql.database.azure.com:3306/petclinic?serverTimezone=UTC
+export MYSQL_USER=$MYSQL_NON_ADMIN_USERNAME
+export MYSQL_PASS=$MYSQL_NON_ADMIN_PASSWORD
+
+```
+
+## Run the application locally 
+
+```
+git clone https://github.com/mohmdnofal/spring-petclinic.git
 cd spring-petclinic
 ./mvnw package
 java -jar target/*.jar
@@ -18,140 +99,150 @@ java -jar target/*.jar
 
 You can then access petclinic at http://localhost:8080/
 
-<img width="1042" alt="petclinic-screenshot" src="https://cloud.githubusercontent.com/assets/838318/19727082/2aee6d6c-9b8e-11e6-81fe-e889a5ddfded.png">
 
-Or you can run it from Maven directly using the Spring Boot Maven plugin. If you do this, it will pick up changes that you make in the project immediately (changes to Java source files require a compile as well - most people use an IDE for this):
 
-```
-./mvnw spring-boot:run
-```
-
-> NOTE: Windows users should set `git config core.autocrlf true` to avoid format assertions failing the build (use `--global` to set that flag globally).
-
-> NOTE: If you prefer to use Gradle, you can build the app using `./gradlew build` and look for the jar file in `build/libs`.
-
-## Building a Container
-
-There is no `Dockerfile` in this project. You can build a container image (if you have a docker daemon) using the Spring Boot build plugin:
+## Deploy the application to App Service 
 
 ```
-./mvnw spring-boot:build-image
+#define the variables 
+APP_SERVICE_PLAN=spring-mysql
+WEB_APP_NAME=spring-mysql-$RANDOM
+
+
+#build the application
+mvn package
+
+#create the app service plan (I used P1V2 to demenstrate the deployment slots and premium features, B1 is more than suffecient to run the demo)
+
+az appservice plan create \
+    --name $APP_SERVICE_PLAN \
+    --resource-group $RESOURCE_GROUP \
+    --sku P1V2 \
+    --is-linux
+
+#check the possible run times 
+az webapp list-runtimes
+
+#create the web app 
+az webapp create \
+    --name $WEB_APP_NAME \
+    --resource-group $RESOURCE_GROUP \
+    --plan $APP_SERVICE_PLAN \
+    --runtime JAVA:17-java17
+
+#add the required environment variables as application settings 
+az webapp config appsettings set \
+    -g $RESOURCE_GROUP \
+    -n $WEB_APP_NAME \
+    --settings "MYSQL_URL=$MYSQL_URL" "MYSQL_USER=$MYSQL_USER" "MYSQL_PASS=$MYSQL_PASS"
+
+
+#deploy the application 
+az webapp deploy \
+    --resource-group $RESOURCE_GROUP \
+    --name $WEB_APP_NAME \
+    --src-path ./target/spring-petclinic-3.0.0-SNAPSHOT.jar \
+    --type jar
+
+#get the application FQDN 
+az webapp show -g $RESOURCE_GROUP -n $WEB_APP_NAME --query defaultHostName -o tsv
 ```
 
-## In case you find a bug/suggested improvement for Spring Petclinic
-Our issue tracker is available [here](https://github.com/spring-projects/spring-petclinic/issues)
+## Create a docker image 
+**Azure Container APPs and AKS would require a container image, so this step is mandatory to run the ACA and AKS demos**
 
-
-## Database configuration
-
-In its default configuration, Petclinic uses an in-memory database (H2) which
-gets populated at startup with data. The h2 console is exposed at `http://localhost:8080/h2-console`,
-and it is possible to inspect the content of the database using the `jdbc:h2:mem:testdb` url.
- 
-A similar setup is provided for MySQL and PostgreSQL if a persistent database configuration is needed. Note that whenever the database type changes, the app needs to run with a different profile: `spring.profiles.active=mysql` for MySQL or `spring.profiles.active=postgres` for PostgreSQL.
-
-You can start MySQL or PostgreSQL locally with whatever installer works for your OS or use docker:
 
 ```
-docker run -e MYSQL_USER=petclinic -e MYSQL_PASSWORD=petclinic -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=petclinic -p 3306:3306 mysql:5.7.8
+#define variables
+IMAGE_NAME=petclinic-mysql
+DOCKER_HUB_ID=mohamman
+
+#build the image 
+docker build --tag $IMAGE_NAME . 
+docker tag $IMAGE_NAME $DOCKER_HUB_ID/$IMAGE_NAME
+
+#push the image 
+docker push $DOCKER_HUB_ID/$IMAGE_NAME
 ```
 
-or
+# Deploy the Application to Azure Container Apps 
 
 ```
-docker run -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 postgres:14.1
+#add container apps extension if not exist 
+az extension add --name containerapp --upgrade
+
+#register the resource providers if not already registered 
+az provider register --namespace Microsoft.App
+az provider register --namespace Microsoft.OperationalInsights
+
+
+#define variables 
+CONTAINERAPPS_ENVIRONMENT=java-aca-env
+CONTAINER_APP_NAME=spring-mysql-$RANDOM
+
+
+#create ACA environment
+az containerapp env create \
+  --name $CONTAINERAPPS_ENVIRONMENT \
+  --resource-group $RESOURCE_GROUP \
+  --location $LOCATION
+
+#deploy the app 
+az containerapp create \
+  --name $CONTAINER_APP_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --environment $CONTAINERAPPS_ENVIRONMENT \
+  --image $DOCKER_HUB_ID/$IMAGE_NAME \
+  --target-port 8080 \
+  --secret "mysql-url=$MYSQL_URL" "mysql-user=$MYSQL_USER" "mysql-pass=$MYSQL_PASS" \
+  --env-vars "MYSQL_URL=secretref:mysql-url" "MYSQL_USER=secretref:mysql-user" "MYSQL_PASS=secretref:mysql-pass" \
+  --ingress 'external' \
+  --query properties.configuration.ingress.fqdn
 ```
 
-Further documentation is provided for [MySQL](https://github.com/spring-projects/spring-petclinic/blob/main/src/main/resources/db/mysql/petclinic_db_setup_mysql.txt)
-and for [PostgreSQL](https://github.com/spring-projects/spring-petclinic/blob/main/src/main/resources/db/postgres/petclinic_db_setup_postgres.txt).
+# Deploy the application to Azure Kubernetes Service 
+Following we will be creating an AKS cluster and deploy the application to it 
 
-## Compiling the CSS
+```
+#define variables 
+AKS_CLUSTER_NAME=java-aks-$RANDOM
 
-There is a `petclinic.css` in `src/main/resources/static/resources/css`. It was generated from the `petclinic.scss` source, combined with the [Bootstrap](https://getbootstrap.com/) library. If you make changes to the `scss`, or upgrade Bootstrap, you will need to re-compile the CSS resources using the Maven profile "css", i.e. `./mvnw package -P css`. There is no build profile for Gradle to compile the CSS.
+#create a single node cluster 
+az aks create \
+    -g $RESOURCE_GROUP \
+    -n $AKS_CLUSTER_NAME \
+    --enable-managed-identity \
+    --node-count 1 \
+    --enable-addons monitoring \
+    --enable-msi-auth-for-monitoring \
+    --generate-ssh-keys
 
-## Working with Petclinic in your IDE
+#get the credinitals so you can access the cluster 
+az aks get-credentials \
+    --resource-group $RESOURCE_GROUP \
+    --name $AKS_CLUSTER_NAME
 
-### Prerequisites
-The following items should be installed in your system:
-* Java 17 or newer (full JDK, not a JRE).
-* [git command line tool](https://help.github.com/articles/set-up-git)
-* Your preferred IDE 
-  * Eclipse with the m2e plugin. Note: when m2e is available, there is an m2 icon in `Help -> About` dialog. If m2e is
-  not there, follow the install process [here](https://www.eclipse.org/m2e/)
-  * [Spring Tools Suite](https://spring.io/tools) (STS)
-  * [IntelliJ IDEA](https://www.jetbrains.com/idea/)
-  * [VS Code](https://code.visualstudio.com)
-
-### Steps:
-
-1) On the command line run:
-    ```
-    git clone https://github.com/spring-projects/spring-petclinic.git
-    ```
-2) Inside Eclipse or STS:
-    ```
-    File -> Import -> Maven -> Existing Maven project
-    ```
-
-    Then either build on the command line `./mvnw generate-resources` or use the Eclipse launcher (right click on project and `Run As -> Maven install`) to generate the css. Run the application main method by right-clicking on it and choosing `Run As -> Java Application`.
-
-3) Inside IntelliJ IDEA
-    In the main menu, choose `File -> Open` and select the Petclinic [pom.xml](pom.xml). Click on the `Open` button.
-
-    CSS files are generated from the Maven build. You can build them on the command line `./mvnw generate-resources` or right-click on the `spring-petclinic` project then `Maven -> Generates sources and Update Folders`.
-
-    A run configuration named `PetClinicApplication` should have been created for you if you're using a recent Ultimate version. Otherwise, run the application by right-clicking on the `PetClinicApplication` main class and choosing `Run 'PetClinicApplication'`.
-
-4) Navigate to Petclinic
-
-    Visit [http://localhost:8080](http://localhost:8080) in your browser.
+#validate 
+kubectl get nodes
 
 
-## Looking for something in particular?
+#create a Kubernetes secret so we can access the databse 
+kubectl create secret generic mysql-secret \
+    --from-literal=mysql_url=$MYSQL_URL \
+    --from-literal=mysql_user=$MYSQL_USER \
+    --from-literal=mysql_pass=$MYSQL_PASS
 
-|Spring Boot Configuration | Class or Java property files  |
-|--------------------------|---|
-|The Main Class | [PetClinicApplication](https://github.com/spring-projects/spring-petclinic/blob/main/src/main/java/org/springframework/samples/petclinic/PetClinicApplication.java) |
-|Properties Files | [application.properties](https://github.com/spring-projects/spring-petclinic/blob/main/src/main/resources) |
-|Caching | [CacheConfiguration](https://github.com/spring-projects/spring-petclinic/blob/main/src/main/java/org/springframework/samples/petclinic/system/CacheConfiguration.java) |
+#a deployment file was created already, we will use it to deploy the app 
+kubectl apply -f k8s/spring-mysql-deployment.yaml
 
-## Interesting Spring Petclinic branches and forks
+#validate 
+kubectl get pods
 
-The Spring Petclinic "main" branch in the [spring-projects](https://github.com/spring-projects/spring-petclinic)
-GitHub org is the "canonical" implementation based on Spring Boot and Thymeleaf. There are
-[quite a few forks](https://spring-petclinic.github.io/docs/forks.html) in the GitHub org
-[spring-petclinic](https://github.com/spring-petclinic). If you are interested in using a different technology stack to implement the Pet Clinic, please join the community there.
+#get the public ip and access the service 
+kubectl get service spring-mysql-svc
+```
 
-
-## Interaction with other open source projects
-
-One of the best parts about working on the Spring Petclinic application is that we have the opportunity to work in direct contact with many Open Source projects. We found bugs/suggested improvements on various topics such as Spring, Spring Data, Bean Validation and even Eclipse! In many cases, they've been fixed/implemented in just a few days.
-Here is a list of them:
-
-| Name | Issue |
-|------|-------|
-| Spring JDBC: simplify usage of NamedParameterJdbcTemplate | [SPR-10256](https://jira.springsource.org/browse/SPR-10256) and [SPR-10257](https://jira.springsource.org/browse/SPR-10257) |
-| Bean Validation / Hibernate Validator: simplify Maven dependencies and backward compatibility |[HV-790](https://hibernate.atlassian.net/browse/HV-790) and [HV-792](https://hibernate.atlassian.net/browse/HV-792) |
-| Spring Data: provide more flexibility when working with JPQL queries | [DATAJPA-292](https://jira.springsource.org/browse/DATAJPA-292) |
+Thanks you if you made it this far :) 
 
 
-# Contributing
 
-The [issue tracker](https://github.com/spring-projects/spring-petclinic/issues) is the preferred channel for bug reports, features requests and submitting pull requests.
-
-For pull requests, editor preferences are available in the [editor config](.editorconfig) for easy use in common text editors. Read more and download plugins at <https://editorconfig.org>. If you have not previously done so, please fill out and submit the [Contributor License Agreement](https://cla.pivotal.io/sign/spring).
-
-# License
-
-The Spring PetClinic sample application is released under version 2.0 of the [Apache License](https://www.apache.org/licenses/LICENSE-2.0).
-
-[spring-petclinic]: https://github.com/spring-projects/spring-petclinic
-[spring-framework-petclinic]: https://github.com/spring-petclinic/spring-framework-petclinic
-[spring-petclinic-angularjs]: https://github.com/spring-petclinic/spring-petclinic-angularjs 
-[javaconfig branch]: https://github.com/spring-petclinic/spring-framework-petclinic/tree/javaconfig
-[spring-petclinic-angular]: https://github.com/spring-petclinic/spring-petclinic-angular
-[spring-petclinic-microservices]: https://github.com/spring-petclinic/spring-petclinic-microservices
-[spring-petclinic-reactjs]: https://github.com/spring-petclinic/spring-petclinic-reactjs
-[spring-petclinic-graphql]: https://github.com/spring-petclinic/spring-petclinic-graphql
-[spring-petclinic-kotlin]: https://github.com/spring-petclinic/spring-petclinic-kotlin
-[spring-petclinic-rest]: https://github.com/spring-petclinic/spring-petclinic-rest
