@@ -242,7 +242,7 @@ kubectl get pods
 kubectl get service spring-mysql-svc
 ```
 
-Thanks you if you made it this far :) 
+Thank you if you made it this far :) 
 
 
 
